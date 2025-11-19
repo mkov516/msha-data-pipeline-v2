@@ -1,0 +1,25 @@
+name: Download MSHA Annual Coal Production ZIP File
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Runs daily at 3:00 AM UTC
+  workflow_dispatch:      # Allows manual runs
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download MSHA Annual Coal Production ZIP
+        run: curl -L -o annual-coal-production.zip "https://arlweb.msha.gov/OpenGovernmentData/DataSets/MinesProdYearly.zip"
+
+      - name: Upload ZIP File as Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: annual-coal-production.zip
+          tag_name: annual-coal-production
+          name: "Annual Coal Production ZIP"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
