@@ -1,0 +1,25 @@
+name: Download MSHA Violations ZIP File
+
+on:
+  schedule:
+    - cron: '0 1 * * *'  # Runs daily at 1:00 AM UTC
+  workflow_dispatch:  # Allows manual runs
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download MSHA Violations ZIP File
+        run: curl -L -o msha-violations.zip "https://arlweb.msha.gov/OpenGovernmentData/DataSets/Violations.zip"
+
+      - name: Upload ZIP File as Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: msha-violations.zip
+          tag_name: msha-violations
+          name: "MSHA Violations ZIP File"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
