@@ -143,15 +143,36 @@ jobs:
 
               original_row_count = len(df)
 
-              parsed_dates = pd.to_datetime(df["INSPECTION_BEGIN_DT"], errors="coerce")
+              sample_vals = df["INSPECTION_BEGIN_DT"].dropna().astype(str).head(5).tolist()
+              print(f"Sample raw INSPECTION_BEGIN_DT values: {sample_vals}")
+
+              parsed_dates = pd.to_datetime(
+                  df["INSPECTION_BEGIN_DT"], format="%m/%d/%Y", errors="coerce"
+              )
+              nat_count = int(parsed_dates.isna().sum())
+              nat_pct = (nat_count / original_row_count) * 100
+              print(
+                  f"Date parse result: {nat_count} of {original_row_count} rows "
+                  f"failed to parse with format %m/%d/%Y ({nat_pct:.1f}%)"
+              )
+
+              if nat_pct > 50:
+                  sys.exit(
+                      f"ERROR: {nat_pct:.1f}% of INSPECTION_BEGIN_DT values failed to parse "
+                      f"using format %m/%d/%Y. Sample raw values: {sample_vals}. "
+                      "The source date format may not match what this script expects - "
+                      "check the samples above and adjust the format string."
+                  )
+
               cutoff = pd.Timestamp(CUTOFF_DATE)
               filtered = df.loc[parsed_dates > cutoff].copy()
 
               if len(filtered) == 0:
                   sys.exit(
                       "ERROR: Filtering by INSPECTION_BEGIN_DT > "
-                      f"{CUTOFF_DATE} produced zero rows out of {original_row_count}. "
-                      "This looks like a date-parsing or source-format problem - refusing to publish an empty dataset."
+                      f"{CUTOFF_DATE} produced zero rows out of {original_row_count}, "
+                      f"even though only {nat_pct:.1f}% of dates failed to parse. "
+                      f"Sample raw values: {sample_vals}. Refusing to publish an empty dataset."
                   )
 
               missing_final = [c for c in FINAL_COLUMNS if c not in filtered.columns]
