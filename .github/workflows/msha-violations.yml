@@ -1,25 +1,210 @@
-name: Download MSHA Violations ZIP File
+name: Download and Filter MSHA Violations ZIP File
 
 on:
   schedule:
-    - cron: '0 1 * * *'  # Runs daily at 1:00 AM UTC
-  workflow_dispatch:  # Allows manual runs
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'If true, skip publishing to the GitHub Release and only upload the result as a workflow artifact for inspection'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+env:
+  SOURCE_URL: https://arlweb.msha.gov/OpenGovernmentData/DataSets/Violations.zip
+  RELEASE_TAG: msha-violations
+  OUTPUT_ZIP: msha-violations.zip
+  OUTPUT_TXT: violations_filtered.txt
+
 jobs:
-  download:
+  process:
     runs-on: ubuntu-latest
     steps:
-      - name: Download MSHA Violations ZIP File
-        run: curl -L -o msha-violations.zip "https://arlweb.msha.gov/OpenGovernmentData/DataSets/Violations.zip"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Upload ZIP File as Release Asset
+      - name: Install dependencies
+        run: pip install pandas
+
+      - name: Download MSHA Violations ZIP File
+        run: curl -L --fail --retry 3 -o source.zip "$SOURCE_URL"
+
+      - name: Extract ZIP
+        run: |
+          mkdir -p extracted
+          unzip -o source.zip -d extracted
+          echo "Extracted files:"
+          find extracted -type f
+
+      - name: Filter and trim dataset
+        env:
+          EXTRACT_DIR: extracted
+          OUTPUT_FILE: ${{ env.OUTPUT_TXT }}
+        run: |
+          cat > filter_violations.py << 'PYEOF'
+          import os
+          import sys
+          import glob
+          import pandas as pd
+
+          EXTRACT_DIR = os.environ.get("EXTRACT_DIR", "extracted")
+          OUTPUT_FILENAME = os.environ.get("OUTPUT_FILE", "violations_filtered.txt")
+
+          DELIMITER = "|"
+          ENCODING = "cp1252"
+          CUTOFF_DATE = "2010-01-01"
+
+          REQUIRED_SOURCE_COLUMNS = [
+              "MINE_ID",
+              "MINE_NAME",
+              "VIOLATION_OCCUR_DT",
+              "CAL_YR",
+              "SECTION_OF_ACT",
+              "LIKELIHOOD",
+              "NO_AFFECTED",
+              "PROPOSED_PENALTY",
+              "AMOUNT_DUE",
+              "INSPECTION_BEGIN_DT",
+          ]
+
+          FINAL_COLUMNS = [
+              "MINE_ID",
+              "MINE_NAME",
+              "VIOLATION_OCCUR_DT",
+              "CAL_YR",
+              "SECTION_OF_ACT",
+              "LIKELIHOOD",
+              "NO_AFFECTED",
+              "PROPOSED_PENALTY",
+              "AMOUNT_DUE",
+          ]
+
+
+          def find_source_file():
+              candidates = sorted(
+                  glob.glob(os.path.join(EXTRACT_DIR, "**", "*.txt"), recursive=True)
+                  + glob.glob(os.path.join(EXTRACT_DIR, "**", "*.csv"), recursive=True)
+              )
+
+              if not candidates:
+                  sys.exit(f"ERROR: No .txt or .csv files found under '{EXTRACT_DIR}'.")
+
+              checked = []
+              for path in candidates:
+                  try:
+                      with open(path, "r", encoding=ENCODING, errors="strict") as f:
+                          header_line = f.readline().strip()
+                  except Exception as e:
+                      checked.append(f"{path} (unreadable: {e})")
+                      continue
+
+                  header_cols = header_line.split(DELIMITER)
+                  missing = [c for c in REQUIRED_SOURCE_COLUMNS if c not in header_cols]
+                  checked.append(f"{path} (missing: {missing})" if missing else path)
+
+                  if not missing:
+                      return path, header_cols
+
+              sys.exit(
+                  "ERROR: Could not find a source file containing all required columns "
+                  f"{REQUIRED_SOURCE_COLUMNS}.\nCandidates checked:\n  "
+                  + "\n  ".join(checked)
+              )
+
+
+          def main():
+              source_path, header_cols = find_source_file()
+              print(f"Using source file: {source_path}")
+              print(f"Detected {len(header_cols)} columns in source header")
+
+              df = pd.read_csv(
+                  source_path,
+                  sep=DELIMITER,
+                  encoding=ENCODING,
+                  dtype=str,
+                  header=0,
+                  names=header_cols,
+                  quoting=3,
+                  on_bad_lines="warn",
+                  low_memory=False,
+              )
+
+              missing_after_load = [c for c in REQUIRED_SOURCE_COLUMNS if c not in df.columns]
+              if missing_after_load:
+                  sys.exit(f"ERROR: Missing expected columns after load: {missing_after_load}")
+
+              if len(df) == 0:
+                  sys.exit("ERROR: Source file parsed to zero rows. Refusing to continue.")
+
+              original_row_count = len(df)
+
+              parsed_dates = pd.to_datetime(df["INSPECTION_BEGIN_DT"], errors="coerce")
+              cutoff = pd.Timestamp(CUTOFF_DATE)
+              filtered = df.loc[parsed_dates > cutoff].copy()
+
+              if len(filtered) == 0:
+                  sys.exit(
+                      "ERROR: Filtering by INSPECTION_BEGIN_DT > "
+                      f"{CUTOFF_DATE} produced zero rows out of {original_row_count}. "
+                      "This looks like a date-parsing or source-format problem - refusing to publish an empty dataset."
+                  )
+
+              missing_final = [c for c in FINAL_COLUMNS if c not in filtered.columns]
+              if missing_final:
+                  sys.exit(f"ERROR: Final columns missing before write: {missing_final}")
+
+              result = filtered[FINAL_COLUMNS].copy()
+
+              if list(result.columns) != FINAL_COLUMNS:
+                  sys.exit("ERROR: Final column order/name mismatch - aborting.")
+
+              result.to_csv(
+                  OUTPUT_FILENAME,
+                  sep=DELIMITER,
+                  encoding=ENCODING,
+                  index=False,
+              )
+
+              print(
+                  f"Wrote {len(result)} rows x {len(result.columns)} columns to {OUTPUT_FILENAME} "
+                  f"(source had {original_row_count} rows / {len(header_cols)} columns)."
+              )
+
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+          python filter_violations.py
+
+      - name: Zip filtered dataset
+        run: zip -j "${{ env.OUTPUT_ZIP }}" "${{ env.OUTPUT_TXT }}"
+
+      - name: Upload filtered file as workflow artifact (for manual testing/inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: msha-violations-filtered
+          path: |
+            ${{ env.OUTPUT_TXT }}
+            ${{ env.OUTPUT_ZIP }}
+          retention-days: 7
+
+      - name: Remove existing release asset (so re-runs don't fail on a duplicate filename)
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: gh release delete-asset "${{ env.RELEASE_TAG }}" "${{ env.OUTPUT_ZIP }}" --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish filtered ZIP as Release Asset
+        if: ${{ github.event.inputs.dry_run != 'true' }}
         uses: softprops/action-gh-release@v1
         with:
-          files: msha-violations.zip
-          tag_name: msha-violations
-          name: "MSHA Violations ZIP File"
+          files: ${{ env.OUTPUT_ZIP }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "MSHA Violations ZIP File (Filtered)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
