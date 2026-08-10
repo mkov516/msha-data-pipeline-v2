@@ -141,6 +141,12 @@ jobs:
               if len(df) == 0:
                   sys.exit("ERROR: Source file parsed to zero rows. Refusing to continue.")
 
+              # MSHA wraps every field in literal double-quote characters (not real CSV
+              # quoting - the quotes are part of the raw text). Strip them off every
+              # string column now, before any parsing or filtering happens.
+              for col in df.columns:
+                  df[col] = df[col].str.strip('"')
+
               original_row_count = len(df)
 
               sample_vals = df["INSPECTION_BEGIN_DT"].dropna().astype(str).head(5).tolist()
